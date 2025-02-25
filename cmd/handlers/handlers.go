@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"time"
 )
 
 type (
@@ -33,10 +34,11 @@ type (
 	// OrderService is an interface that defines the order service methods
 	OrderService interface {
 		AddOrder(ctx context.Context, order internal.Order) error
-		GetOrderByID(ctx context.Context, id string) (*internal.Order, error)
+		OrderByID(ctx context.Context, id string) (*internal.Order, error)
 		UpdateOrder(ctx context.Context, id string, order internal.Order) error
 		CancelOrder(ctx context.Context, id string) error
-		GetActiveOrders() []internal.Order
+		ActiveOrders() []internal.Order
+		Stats(ctx context.Context) (time.Duration, float64, int)
 	}
 )
 
@@ -75,7 +77,7 @@ func GetOrder(service OrderService) http.HandlerFunc {
 			return
 		}
 
-		order, err := service.GetOrderByID(r.Context(), id)
+		order, err := service.OrderByID(r.Context(), id)
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			if errors.Is(err, internal.ErrOrderNotFound) {
@@ -129,6 +131,17 @@ func UpdateOrder(service OrderService) http.HandlerFunc {
 
 		err = service.UpdateOrder(r.Context(), id, order)
 		if err != nil {
+
+			if errors.Is(err, internal.ErrOrderNotFound) {
+				http.Error(w, err.Error(), http.StatusNotFound)
+				return
+			}
+
+			if errors.Is(err, internal.ErrOrderInvalidStatusTransition) {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -140,7 +153,7 @@ func UpdateOrder(service OrderService) http.HandlerFunc {
 // GetActiveOrders is a handler function that retrieves all active orders
 func GetActiveOrders(service OrderService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		activeOrders := service.GetActiveOrders()
+		activeOrders := service.ActiveOrders()
 
 		var activeOrdersResponse []response
 		for _, order := range activeOrders {
@@ -179,5 +192,27 @@ func CancelOrder(service OrderService) http.HandlerFunc {
 		}
 
 		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+func GetStats(service OrderService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		avgPreparationTime, ordersPerHour, totalActiveOrders := service.Stats(r.Context())
+
+		response := struct {
+			AvgPreparationTime time.Duration `json:"avg_preparation_time"`
+			OrdersPerHour      float64       `json:"orders_per_hour"`
+			TotalActiveOrders  int           `json:"total_duration"`
+		}{
+			AvgPreparationTime: avgPreparationTime,
+			OrdersPerHour:      ordersPerHour,
+			TotalActiveOrders:  totalActiveOrders,
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		err := json.NewEncoder(w).Encode(response)
+		if err != nil {
+			return
+		}
 	}
 }

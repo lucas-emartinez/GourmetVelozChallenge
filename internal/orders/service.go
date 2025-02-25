@@ -9,8 +9,8 @@ import (
 	"time"
 )
 
-// OrderRepository defines database interactions.
 type (
+	// OrderRepository defines database interactions.
 	OrderRepository interface {
 		CreateOrder(ctx context.Context, order *internal.Order) error
 		GetOrderByID(ctx context.Context, id string) (*internal.Order, error)
@@ -23,24 +23,18 @@ type (
 		repo          OrderRepository
 		vipOrders     map[string]internal.Order
 		regularOrders map[string]internal.Order
-		mu            sync.RWMutex        // Read/Write mutex for the map
-		addChan       chan internal.Order // Add order channel
-		updateChan    chan internal.Order // Update order channel
-		cancelChan    chan string         // Cancel order channel
-		quitChan      chan struct{}       // Quit channel
+		mu            sync.RWMutex // Read/Write mutex for the map
+		eventChan     chan Event   // Event channel
 	}
 )
 
 // New creates a new OrderService with an empty queue.
-func NewService(repo OrderRepository) *OrderService {
+func NewService(orderRepository OrderRepository) *OrderService {
 	s := &OrderService{
-		repo:          repo,
+		repo:          orderRepository,
 		vipOrders:     make(map[string]internal.Order),
 		regularOrders: make(map[string]internal.Order),
-		addChan:       make(chan internal.Order, 100), // Buffer para 100 pedidos simultáneos
-		updateChan:    make(chan internal.Order, 100),
-		cancelChan:    make(chan string, 100),
-		quitChan:      make(chan struct{}),
+		eventChan:     make(chan Event),
 	}
 
 	// initialize the service with the active orders from the database
@@ -72,41 +66,45 @@ func (s *OrderService) loadInitialOrders(ctx context.Context) {
 
 // processEvents listen for events on the channels and processes them according to the event type.
 func (s *OrderService) processEvents() {
-	for {
-		select {
-		case order := <-s.addChan:
-			if err := s.repo.CreateOrder(context.Background(), &order); err != nil {
-				fmt.Printf("Error saving order: %v\n", err)
+	for event := range s.eventChan {
+		switch event.Type {
+		case EventAdd:
+			if err := s.repo.CreateOrder(context.Background(), &event.Order); err != nil {
+				fmt.Printf("Error guardando pedido: %v\n", err)
 				continue
 			}
 			s.mu.Lock()
-			if *order.VIP {
-				s.vipOrders[order.ID] = order
+			if *event.Order.VIP {
+				s.vipOrders[event.Order.ID] = event.Order
 			} else {
-				s.regularOrders[order.ID] = order
+				s.regularOrders[event.Order.ID] = event.Order
 			}
 			s.mu.Unlock()
 
-		case order := <-s.updateChan:
-			if err := s.repo.Update(context.Background(), order); err != nil {
-				fmt.Printf("Error updating order: %v\n", err)
+		case EventUpdate:
+			if err := s.repo.Update(context.Background(), event.Order); err != nil {
+				fmt.Printf("Error actualizando pedido: %v\n", err)
 				continue
 			}
 			s.mu.Lock()
-			if *order.VIP {
-				s.vipOrders[order.ID] = order
+			if *event.Order.VIP {
+				s.vipOrders[event.Order.ID] = event.Order
 			} else {
-				s.regularOrders[order.ID] = order
+				s.regularOrders[event.Order.ID] = event.Order
 			}
 			s.mu.Unlock()
 
-		case id := <-s.cancelChan:
+		case EventCancel:
 			s.mu.Lock()
-			delete(s.vipOrders, id)
-			delete(s.regularOrders, id)
+			delete(s.vipOrders, event.ID)
+			delete(s.regularOrders, event.ID)
 			s.mu.Unlock()
 
-		case <-s.quitChan:
+		case EventNotify:
+			fmt.Printf("NOTIFICACIÓN: Pedido %s está listo para entrega (Fuente: %s, VIP: %v)\n",
+				event.Order.ID, event.Order.Source, *event.Order.VIP)
+
+		case EventShutdown:
 			return
 		}
 	}
@@ -122,7 +120,7 @@ func (s *OrderService) AddOrder(ctx context.Context, order internal.Order) error
 	}
 
 	select {
-	case s.addChan <- order:
+	case s.eventChan <- Event{Type: EventAdd, Order: order}:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -132,7 +130,7 @@ func (s *OrderService) AddOrder(ctx context.Context, order internal.Order) error
 }
 
 // GetOrderByID returns an order by its ID.
-func (s *OrderService) GetOrderByID(ctx context.Context, id string) (*internal.Order, error) {
+func (s *OrderService) OrderByID(ctx context.Context, id string) (*internal.Order, error) {
 	s.mu.RLock()
 	if regularOrder, regularExists := s.regularOrders[id]; regularExists {
 		s.mu.RUnlock()
@@ -172,22 +170,35 @@ func (s *OrderService) UpdateOrder(ctx context.Context, id string, order interna
 	} else if regularExists {
 		existingOrder = regularOrder
 	} else {
-		return fmt.Errorf("order %s not found", id)
+		return internal.ErrOrderNotFound
 	}
 
 	if order.Dishes != nil {
 		existingOrder.Dishes = order.Dishes
 	}
 
-	if order.Status != "" {
-		if !validTransition(existingOrder.Status, order.Status) {
-			return fmt.Errorf("invalid status transition from %s to %s", existingOrder.Status, order.Status)
+	if order.Source != "" {
+		existingOrder.Source = order.Source
+	}
+
+	if order.VIP != nil {
+		existingOrder.VIP = order.VIP
+	}
+
+	if order.Status != "" && isValidStatus(order.Status) {
+		if !isValidTransition(existingOrder.Status, order.Status) {
+			return internal.ErrOrderInvalidStatusTransition
 		}
 
 		existingOrder.Status = order.Status
 
 		if order.Status == internal.StatusReady {
 			existingOrder.PreparationTime = time.Since(existingOrder.ArrivalTime)
+			select {
+			case s.eventChan <- Event{Type: EventNotify, Order: existingOrder}:
+			default:
+				fmt.Printf("Failed to notify order %s\n", id)
+			}
 		}
 
 		if order.Status == internal.StatusCancelled || order.Status == internal.StatusDelivered {
@@ -199,16 +210,8 @@ func (s *OrderService) UpdateOrder(ctx context.Context, id string, order interna
 		}
 	}
 
-	if order.Source != "" {
-		existingOrder.Source = order.Source
-	}
-
-	if order.VIP != nil {
-		existingOrder.VIP = order.VIP
-	}
-
 	select {
-	case s.updateChan <- existingOrder:
+	case s.eventChan <- Event{Type: EventUpdate, Order: existingOrder}:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -220,17 +223,17 @@ func (s *OrderService) UpdateOrder(ctx context.Context, id string, order interna
 // CancelOrder cancels an order.
 func (s *OrderService) CancelOrder(ctx context.Context, id string) error {
 	select {
-	case s.cancelChan <- id:
+	case s.eventChan <- Event{Type: EventCancel, ID: id}:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	default:
-		return fmt.Errorf("failed to cancel order %s", id)
+		return fmt.Errorf("cola de eventos llena")
 	}
 }
 
 // GetActiveOrders returns all the active orders sorted by VIP and arrival time.
-func (s *OrderService) GetActiveOrders() []internal.Order {
+func (s *OrderService) ActiveOrders() []internal.Order {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -247,7 +250,7 @@ func (s *OrderService) GetActiveOrders() []internal.Order {
 		}
 	}
 
-	// Ordenar cada cola por ArrivalTime
+	// Order each queue by arrival time
 	sort.Slice(vipActive, func(i, j int) bool {
 		return vipActive[i].ArrivalTime.Before(vipActive[j].ArrivalTime)
 	})
@@ -255,7 +258,8 @@ func (s *OrderService) GetActiveOrders() []internal.Order {
 		return regularActive[i].ArrivalTime.Before(regularActive[j].ArrivalTime)
 	})
 
-	// 2:1 ratio (2 VIP / 1 no VIP)
+	// 2:1 ratio (2 VIP / 1 no VIP) - With this ratio, we guarantee that VIP orders are processed faster but without causing
+	// starvation for the regular orders.
 	var result []internal.Order
 	vipIndex, regularIndex := 0, 0
 	for vipIndex < len(vipActive) || regularIndex < len(regularActive) {
@@ -274,9 +278,50 @@ func (s *OrderService) GetActiveOrders() []internal.Order {
 	return result
 }
 
+// GetStats returns the statistics of the orders, such as the number of total active orders, orders per hour and average preparation time.
+func (s *OrderService) Stats(ctx context.Context) (time.Duration, float64, int) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var totalPreparationTime time.Duration
+	var ordersPerHour float64
+
+	totalActiveOrders := len(s.vipOrders) + len(s.regularOrders)
+
+	// Calculate the total preparation time for current active orders and the number of orders per hour
+	for _, order := range s.vipOrders {
+		if order.Status == internal.StatusReady {
+			totalPreparationTime += order.PreparationTime
+		}
+
+		if order.ArrivalTime.After(time.Now().Add(-time.Hour)) {
+			ordersPerHour++
+		}
+	}
+
+	for _, order := range s.regularOrders {
+		if order.Status == internal.StatusReady {
+			totalPreparationTime += order.PreparationTime
+		}
+
+		if order.ArrivalTime.After(time.Now().Add(-time.Hour)) {
+			ordersPerHour++
+		}
+	}
+
+	// Calculate the average preparation time
+	avgPreparationTime := time.Duration(0)
+	if totalActiveOrders > 0 {
+		avgPreparationTime = totalPreparationTime / time.Duration(totalActiveOrders)
+	}
+
+	return avgPreparationTime, 0, totalActiveOrders
+}
+
 // Shutdown closes the service by closing the quit channel.
 func (s *OrderService) Shutdown() {
-	close(s.quitChan)
+	s.eventChan <- Event{Type: EventShutdown}
+	close(s.eventChan)
 }
 
 // isValidStatus checks if a status is valid.
@@ -299,7 +344,7 @@ func isValidSource(source internal.OrderSource) bool {
 	}
 }
 
-func validTransition(from, to internal.OrderStatus) bool {
+func isValidTransition(from, to internal.OrderStatus) bool {
 	switch from {
 	case internal.StatusPending:
 		return to == internal.StatusInPreparation || to == internal.StatusCancelled
