@@ -11,17 +11,17 @@ import (
 	"time"
 )
 
-// OrderRepository is a struct that contains a reference to the database
+// OrderRepository es una estructura que maneja la persistencia de las órdenes
 type OrderRepository struct {
 	db *database.Database
 }
 
-// NewOrderRepository creates a new OrderRepository
+// NewOrderRepository crea un nuevo OrderRepository
 func NewOrderRepository(db *database.Database) *OrderRepository {
 	return &OrderRepository{db: db}
 }
 
-// CreateOrder creates a new order
+// CreateOrder crea una nueva orden
 func (r *OrderRepository) CreateOrder(ctx context.Context, order *internal.Order) error {
 	query := `INSERT INTO orders (arrival_time, dishes, status, source, vip, preparation_time) VALUES (?, ?, ?, ?, ?, ?)`
 
@@ -33,7 +33,7 @@ func (r *OrderRepository) CreateOrder(ctx context.Context, order *internal.Order
 		order.Status,
 		order.Source,
 		order.VIP,
-		order.PreparationTime,
+		durationToMySQLTime(order.PreparationTime),
 	)
 	if err != nil {
 		return err
@@ -48,6 +48,8 @@ func (r *OrderRepository) CreateOrder(ctx context.Context, order *internal.Order
 	return nil
 }
 
+// GetActiveOrders devuelve todas las órdenes activas
+// las activas son las que tienen estado pending, preparing, ready
 func (r *OrderRepository) GetActiveOrders(ctx context.Context) ([]internal.Order, error) {
 
 	query := `SELECT id, arrival_time, dishes, status, source, vip, preparation_time FROM orders
@@ -95,13 +97,14 @@ func (r *OrderRepository) GetActiveOrders(ctx context.Context) ([]internal.Order
 	return orders, nil
 }
 
-// GetOrderByID returns an order by its ID
+// GetOrderByID devuelve una orden por su ID
 func (r *OrderRepository) GetOrderByID(ctx context.Context, id string) (*internal.Order, error) {
 	query := `SELECT id, arrival_time, dishes, status, source, vip, preparation_time FROM orders WHERE id = ?`
 
 	row := r.db.QueryRowContext(ctx, query, id)
 	var order internal.Order
 	var dishes string
+	var preparationTime sql.NullString
 
 	err := row.Scan(
 		&order.ID,
@@ -110,20 +113,27 @@ func (r *OrderRepository) GetOrderByID(ctx context.Context, id string) (*interna
 		&order.Status,
 		&order.Source,
 		&order.VIP,
-		&order.PreparationTime,
+		&preparationTime,
 	)
 	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, nil
-		}
 		return nil, err
+	}
+
+	if preparationTime.Valid {
+		duration, err := parseMySQLTimeToDuration(preparationTime.String)
+		if err != nil {
+			return nil, err
+		}
+		order.PreparationTime = duration
+	} else {
+		order.PreparationTime = 0
 	}
 
 	order.Dishes = strings.Split(dishes, ",")
 	return &order, nil
 }
 
-// Update updates the order.
+// Update actualiza los valores de una orden
 func (r *OrderRepository) Update(ctx context.Context, order internal.Order) error {
 	query := `UPDATE orders SET arrival_time = ?, dishes = ?, status = ?, source = ?, vip = ?, preparation_time = ? WHERE id = ?`
 	_, err := r.db.ExecContext(ctx, query, order.ArrivalTime, strings.Join(order.Dishes, ","),
@@ -131,7 +141,29 @@ func (r *OrderRepository) Update(ctx context.Context, order internal.Order) erro
 	return err
 }
 
-// Conversion from "HH:MM:SS" to time.Duration
+// Stats devuelve las estadísticas de las órdenes en la última hora
+func (r *OrderRepository) Stats(ctx context.Context) (string, float64, int) {
+	query := `
+		SELECT 
+			COALESCE(AVG(CASE WHEN status = 'ready' THEN TIME_TO_SEC(preparation_time) END), 0) AS avg_preparation_seconds,
+			COUNT(CASE WHEN arrival_time >= NOW() - INTERVAL 1 HOUR THEN 1 END) AS orders_per_hour,
+			COUNT(CASE WHEN status NOT IN ('delivered', 'cancelled') THEN 1 END) AS total_active_orders
+		FROM orders`
+
+	var avgPrepSeconds float64
+	var ordersPerHour float64
+	var totalActiveOrders int
+
+	err := r.db.QueryRowContext(ctx, query).Scan(&avgPrepSeconds, &ordersPerHour, &totalActiveOrders)
+	if err != nil {
+		fmt.Println("Error getting stats:", err)
+		return "", 0, 0
+	}
+
+	return durationToMySQLTime(time.Duration(int(avgPrepSeconds)) * time.Second), ordersPerHour, totalActiveOrders
+}
+
+// Convierne una cadena de tiempo MySQL en una duración de GO
 func parseMySQLTimeToDuration(timeStr string) (time.Duration, error) {
 	parts := strings.Split(timeStr, ":")
 	if len(parts) != 3 {
@@ -156,7 +188,7 @@ func parseMySQLTimeToDuration(timeStr string) (time.Duration, error) {
 		time.Duration(seconds)*time.Second.Round(time.Second), nil
 }
 
-// Format time.Duration as "HH:MM:SS"
+// Convierte una duración de GO en una cadena de tiempo MySQL
 func durationToMySQLTime(d time.Duration) string {
 	hours := int(d.Hours())
 	minutes := int(d.Minutes()) % 60

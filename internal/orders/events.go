@@ -2,7 +2,7 @@ package orders
 
 import "YunoChallenge/internal"
 
-// EventType defines the supported event types.
+// EventType define los tipos de eventos que pueden ser procesados por el servicio
 type EventType string
 
 const (
@@ -13,7 +13,7 @@ const (
 	EventShutdown EventType = "shutdown"
 )
 
-// Event represents an event that can be processed by the service.
+// Event es una estructura que representa un evento
 type Event struct {
 	Type  EventType
 	Order internal.Order

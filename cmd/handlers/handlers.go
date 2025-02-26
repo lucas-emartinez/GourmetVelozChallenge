@@ -15,9 +15,9 @@ type (
 		ID          string   `json:"id"`
 		ArrivalTime string   `json:"arrival_time"`
 		Dishes      []string `json:"dishes"`
-		Status      *string  `json:"status"`
+		Status      string   `json:"status"`
 		Source      string   `json:"source"`
-		VIP         *bool    `json:"vip"`
+		VIP         bool     `json:"vip"`
 	}
 
 	// response is a struct that represents an order response
@@ -36,9 +36,8 @@ type (
 		AddOrder(ctx context.Context, order internal.Order) error
 		OrderByID(ctx context.Context, id string) (*internal.Order, error)
 		UpdateOrder(ctx context.Context, id string, order internal.Order) error
-		CancelOrder(ctx context.Context, id string) error
 		ActiveOrders() []internal.Order
-		Stats(ctx context.Context) (time.Duration, float64, int)
+		Stats(ctx context.Context) (string, float64, int)
 	}
 )
 
@@ -54,13 +53,21 @@ func CreateOrder(service OrderService) http.HandlerFunc {
 
 		order := internal.Order{
 			Dishes: orderReq.Dishes,
-			Source: orderReq.Source,
+			Source: internal.OrderSource(orderReq.Source),
 			VIP:    orderReq.VIP,
 		}
 
 		err = service.AddOrder(r.Context(), order)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			w.Header().Set("Content-Type", "application/json")
+			statusCode := http.StatusInternalServerError
+
+			if errors.Is(err, internal.ErrInvalidOrderSource) {
+				statusCode = http.StatusBadRequest
+			}
+
+			w.WriteHeader(statusCode)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
 		}
 
@@ -90,14 +97,18 @@ func GetOrder(service OrderService) http.HandlerFunc {
 			return
 		}
 
+		localLocation, _ := time.LoadLocation("Local")
+		arrivalTime := order.ArrivalTime.In(localLocation).Format("2006-01-02 15:04:05")
+		preparationTime := order.PreparationTime.String()
+
 		response := response{
 			ID:              id,
-			ArrivalTime:     order.ArrivalTime.Format("2006-01-02 15:04:05"),
+			ArrivalTime:     arrivalTime,
 			Dishes:          order.Dishes,
 			Status:          string(order.Status),
-			Source:          order.Source,
-			VIP:             *order.VIP,
-			PreparationTime: order.PreparationTime.String(),
+			Source:          string(order.Source),
+			VIP:             order.VIP,
+			PreparationTime: preparationTime,
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -124,29 +135,27 @@ func UpdateOrder(service OrderService) http.HandlerFunc {
 		order := internal.Order{
 			ID:     id,
 			Dishes: orderReq.Dishes,
-			Status: internal.OrderStatus(*orderReq.Status),
-			Source: orderReq.Source,
+			Status: internal.OrderStatus(orderReq.Status),
+			Source: internal.OrderSource(orderReq.Source),
 			VIP:    orderReq.VIP,
 		}
 
 		err = service.UpdateOrder(r.Context(), id, order)
 		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			statusCode := http.StatusInternalServerError
 
-			if errors.Is(err, internal.ErrOrderNotFound) {
-				http.Error(w, err.Error(), http.StatusNotFound)
-				return
+			switch {
+			case errors.Is(err, internal.ErrOrderNotFound):
+				statusCode = http.StatusNotFound
+			case errors.Is(err, internal.ErrOrderInvalidStatusTransition):
+				statusCode = http.StatusBadRequest
 			}
 
-			if errors.Is(err, internal.ErrOrderInvalidStatusTransition) {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			w.WriteHeader(statusCode)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
 		}
-
-		w.WriteHeader(http.StatusNoContent)
 	}
 }
 
@@ -155,43 +164,43 @@ func GetActiveOrders(service OrderService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		activeOrders := service.ActiveOrders()
 
-		var activeOrdersResponse []response
+		activeOrdersResponse := struct {
+			Pending   []response `json:"pending"`
+			Preparing []response `json:"preparing"`
+			Ready     []response `json:"ready"`
+		}{
+			Pending:   make([]response, 0),
+			Preparing: make([]response, 0),
+			Ready:     make([]response, 0),
+		}
+
+		localLocation, _ := time.LoadLocation("Local")
 		for _, order := range activeOrders {
-			activeOrdersResponse = append(activeOrdersResponse, response{
+			arrivalTime := order.ArrivalTime.In(localLocation).Format("2006-01-02 15:04:05")
+			preparationTime := order.PreparationTime.String()
+
+			orderResponse := response{
 				ID:              order.ID,
-				ArrivalTime:     order.ArrivalTime.Format("2006-01-02 15:04:05"),
+				ArrivalTime:     arrivalTime,
 				Dishes:          order.Dishes,
 				Status:          string(order.Status),
-				Source:          order.Source,
-				VIP:             *order.VIP,
-				PreparationTime: order.PreparationTime.String(),
-			})
+				Source:          string(order.Source),
+				VIP:             order.VIP,
+				PreparationTime: preparationTime,
+			}
+
+			switch order.Status {
+			case internal.StatusPending:
+				activeOrdersResponse.Pending = append(activeOrdersResponse.Pending, orderResponse)
+			case internal.StatusInPreparation:
+				activeOrdersResponse.Preparing = append(activeOrdersResponse.Preparing, orderResponse)
+			case internal.StatusReady:
+				activeOrdersResponse.Ready = append(activeOrdersResponse.Ready, orderResponse)
+			}
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		err := json.NewEncoder(w).Encode(activeOrdersResponse)
-		if err != nil {
-			return
-		}
-	}
-}
-
-// CancelOrder is a handler function that cancels an order
-func CancelOrder(service OrderService) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := r.PathValue("id")
-		if id == "" {
-			http.Error(w, "Missing order ID", http.StatusBadRequest)
-			return
-		}
-
-		err := service.CancelOrder(r.Context(), id)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		w.WriteHeader(http.StatusNoContent)
+		json.NewEncoder(w).Encode(activeOrdersResponse)
 	}
 }
 
@@ -200,9 +209,9 @@ func GetStats(service OrderService) http.HandlerFunc {
 		avgPreparationTime, ordersPerHour, totalActiveOrders := service.Stats(r.Context())
 
 		response := struct {
-			AvgPreparationTime time.Duration `json:"avg_preparation_time"`
-			OrdersPerHour      float64       `json:"orders_per_hour"`
-			TotalActiveOrders  int           `json:"total_duration"`
+			AvgPreparationTime string  `json:"avg_preparation_time"`
+			OrdersPerHour      float64 `json:"orders_per_hour"`
+			TotalActiveOrders  int     `json:"active_orders"`
 		}{
 			AvgPreparationTime: avgPreparationTime,
 			OrdersPerHour:      ordersPerHour,
@@ -210,9 +219,6 @@ func GetStats(service OrderService) http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		err := json.NewEncoder(w).Encode(response)
-		if err != nil {
-			return
-		}
+		json.NewEncoder(w).Encode(response)
 	}
 }

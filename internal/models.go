@@ -5,31 +5,30 @@ import (
 	"time"
 )
 
-// ErrOrderNotFound is an error that indicates that an order was not found
+// ErrOrderNotFound es un error que indica que una orden no fue encontrada
 var ErrOrderNotFound error = errors.New("order not found")
 
-// ErrOrderInvalidStatusTransition is an error that indicates that the status transition is invalid
+// ErrOrderInvalidStatusTransition es un error que indica que la transición de estado de una orden es inválida
 var ErrOrderInvalidStatusTransition error = errors.New("invalid status transition")
 
-// ErrInvalidOrderSource is an error that indicates that the order source is invalid
+// ErrInvalidOrderSource es un error que indica que la fuente de una orden es inválida
 var ErrInvalidOrderSource error = errors.New("invalid order source")
 
 type (
-	// Order is a struct that represents an order
-	// Priority is a flag that indicates if the order is a VIP order
+	// Order es una estructura que representa una orden
 	Order struct {
 		ID              string
 		ArrivalTime     time.Time
 		Dishes          []string
 		Status          OrderStatus
-		Source          string
-		VIP             *bool
+		Source          OrderSource
+		VIP             bool
 		PreparationTime time.Duration
 	}
 
-	// orderStatus is a string that represents the status of an order
+	// orderStatus es un tipo que representa el estado de una orden
 	OrderStatus string
-	// OrderSource is a string that represents the source of an order
+	// OrderSource es un tipo que representa la fuente de una orden
 	OrderSource string
 )
 

@@ -9,12 +9,12 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 )
 
-// Database DB is a struct that embeds a sql.DB
+// Database es una estructura que envuelve la conexión a la base de datos
 type Database struct {
 	*sql.DB
 }
 
-// New creates a connection to the database and returns a reference to the DB struct
+// New crea la conexión a la base de datos y crea la tabla de órdenes si no existe
 func New(config config.DatabaseConfig) (*Database, error) {
 	dsn := config.User + ":" + config.Pass + "@tcp(" + config.Host + ":" + config.Port + ")/?parseTime=true"
 	db, err := sql.Open("mysql", dsn)
@@ -39,7 +39,6 @@ func New(config config.DatabaseConfig) (*Database, error) {
 		return nil, err
 	}
 
-	// Create the orders table
 	_, err = db.Exec(`
 		CREATE TABLE IF NOT EXISTS orders (
 			id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -61,7 +60,7 @@ func New(config config.DatabaseConfig) (*Database, error) {
 	return &Database{db}, nil
 }
 
-// Close closes the database connection
+// Close cierra la conexión a la base de datos
 func (db *Database) Close() error {
 	return db.DB.Close()
 }

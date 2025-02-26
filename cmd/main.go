@@ -49,6 +49,5 @@ func loadRoutes(router *http.ServeMux, service *orders.OrderService) {
 	router.HandleFunc("GET /orders/{id}", handlers.GetOrder(service))
 	router.HandleFunc("PUT /orders/{id}", handlers.UpdateOrder(service))
 	router.HandleFunc("GET /orders", handlers.GetActiveOrders(service))
-	router.HandleFunc("DELETE /orders/{id}", handlers.CancelOrder(service))
 	router.HandleFunc("GET /stats", handlers.GetStats(service)) // Nuevo endpoint
 }

@@ -1,12 +1,14 @@
 package config
 
-// Config holds the configuration for the application
+import "os"
+
+// Config tiene la configuración para la aplicación
 type Config struct {
 	Database DatabaseConfig
 	Server   ServerConfig
 }
 
-// DatabaseConfig holds the configuration for the database
+// DatabaseConfig tiene la configuración para la base de datos
 type DatabaseConfig struct {
 	Host string
 	Port string
@@ -14,22 +16,22 @@ type DatabaseConfig struct {
 	Pass string
 }
 
-// ServerConfig holds the configuration for the server
+// ServerConfig tiene la configuración para el servidor
 type ServerConfig struct {
 	Port string
 }
 
-// LoadConfig loads the configuration for the application
+// LoadConfig carga la configuración de la aplicación desde las variables de entorno
 func LoadConfig() *Config {
 	return &Config{
 		Database: DatabaseConfig{
-			Host: "localhost",
-			Port: "3306",
-			User: "root",
-			Pass: "password",
+			Host: os.Getenv("DB_HOST"),
+			Port: os.Getenv("DB_PORT"),
+			User: os.Getenv("DB_USER"),
+			Pass: os.Getenv("DB_PASS"),
 		},
 		Server: ServerConfig{
-			Port: "8080",
+			Port: os.Getenv("SERVER_PORT"),
 		},
 	}
 }
